@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"D:\\\\dev-sandbox\\\\Pomodoro\" -Force)",
+      "Bash(Select-Object Name, PSIsContainer)",
+      "Bash(npm install *)",
+      "Bash(npm test *)",
+      "Bash(npm run *)"
+    ]
+  }
+}
