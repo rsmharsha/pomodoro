@@ -58,7 +58,9 @@ export function TaskBreakdown({ data }: TaskBreakdownProps) {
               borderRadius: "0.5rem",
               fontSize: 12,
             }}
-            formatter={(val: number) => [`${val}m`, ""]}
+            labelStyle={{ color: "hsl(var(--foreground))" }}
+            itemStyle={{ color: "hsl(var(--foreground))" }}
+            formatter={(val: number) => [formatHoursMinutes(val * 60), ""]}
           />
           <Legend
             formatter={(value) => <span style={{ fontSize: 12, color: "hsl(var(--foreground))" }}>{value}</span>}

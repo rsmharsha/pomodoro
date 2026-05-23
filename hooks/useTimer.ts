@@ -66,7 +66,8 @@ export function useTimer() {
   const onCompleteRef = useRef<(() => void) | null>(null);
 
   function getDurationForType(type: SessionType): number {
-    if (customDurationSec !== null) return customDurationSec;
+    // Custom duration only applies to focus sessions — breaks always use settings values.
+    if (type === "focus" && customDurationSec !== null) return customDurationSec;
     switch (type) {
       case "focus":
         return settings.focusDurationSec;
@@ -231,6 +232,8 @@ export function useTimer() {
   function setCustomDuration(minutes: number) {
     const sec = minutes * 60;
     stopGlobalTick();
+    // Custom durations are a focus-session feature; if a break is active, switch to focus.
+    if (sessionType !== "focus") setSessionType("focus");
     setCustomDurationSec(sec);
     setSecondsRemaining(sec);
     setTotalSeconds(sec);
