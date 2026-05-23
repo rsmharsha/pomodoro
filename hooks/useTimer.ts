@@ -3,7 +3,44 @@
 import { useEffect, useRef, useCallback } from "react";
 import { useStore, type SessionType } from "@/lib/store";
 import { useSessions } from "@/hooks/useSessions";
-import { uuid } from "@/lib/utils";
+import {
+  computeActualDurationSec,
+  computeRemainingSec,
+  resumeSessionStartedAt,
+} from "@/lib/timer-math";
+
+// Module-level singleton tick state. Guarantees only one interval ever runs,
+// even if multiple components mount useTimer simultaneously.
+let globalTickInterval: ReturnType<typeof setInterval> | null = null;
+let globalOnComplete: (() => void) | null = null;
+
+function startGlobalTick() {
+  if (globalTickInterval) return;
+  globalTickInterval = setInterval(() => {
+    const state = useStore.getState();
+    if (state.status !== "running") {
+      stopGlobalTick();
+      return;
+    }
+    // Derive remaining seconds from wall-clock time so the timer stays accurate
+    // even when the browser throttles setInterval (background tabs, system sleep).
+    if (state.sessionStartedAt === null) return;
+    const next = computeRemainingSec(state.totalSeconds, state.sessionStartedAt, Date.now());
+    if (next === state.secondsRemaining) return;
+    useStore.setState({ secondsRemaining: next });
+    if (next <= 0) {
+      stopGlobalTick();
+      globalOnComplete?.();
+    }
+  }, 250);
+}
+
+function stopGlobalTick() {
+  if (globalTickInterval) {
+    clearInterval(globalTickInterval);
+    globalTickInterval = null;
+  }
+}
 
 export function useTimer() {
   const {
@@ -22,12 +59,10 @@ export function useTimer() {
     setTotalSeconds,
     setSessionStartedAt,
     incrementCompletedFocusSessions,
-    resetCompletedFocusSessions,
     setCustomDurationSec,
   } = useStore();
 
   const { logSession } = useSessions();
-  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const onCompleteRef = useRef<(() => void) | null>(null);
 
   function getDurationForType(type: SessionType): number {
@@ -42,25 +77,16 @@ export function useTimer() {
     }
   }
 
-  function clearTick() {
-    if (tickRef.current) {
-      clearInterval(tickRef.current);
-      tickRef.current = null;
-    }
-  }
-
   const handleComplete = useCallback(async () => {
-    clearTick();
     const now = Date.now();
     const startedAt = sessionStartedAt ?? now - totalSeconds * 1000;
-    const actualSec = Math.round((now - startedAt) / 1000);
 
     await logSession({
       taskId: sessionType === "focus" ? activeTaskId : null,
       startedAt,
       endedAt: now,
       plannedDurationSec: totalSeconds,
-      actualDurationSec: Math.min(actualSec, totalSeconds),
+      actualDurationSec: computeActualDurationSec(startedAt, now, totalSeconds),
       type: sessionType,
     });
 
@@ -94,30 +120,21 @@ export function useTimer() {
   onCompleteRef.current = handleComplete;
 
   useEffect(() => {
-    if (status !== "running") {
-      clearTick();
-      return;
+    globalOnComplete = () => onCompleteRef.current?.();
+    if (status === "running") {
+      startGlobalTick();
+    } else {
+      stopGlobalTick();
     }
-
-    tickRef.current = setInterval(() => {
-      useStore.setState((state) => {
-        const next = state.secondsRemaining - 1;
-        if (next <= 0) {
-          clearInterval(tickRef.current!);
-          tickRef.current = null;
-          onCompleteRef.current?.();
-          return { secondsRemaining: 0 };
-        }
-        return { secondsRemaining: next };
-      });
-    }, 1000);
-
-    return clearTick;
   }, [status]);
 
   function start() {
     if (status === "idle") {
       setSessionStartedAt(Date.now());
+    } else if (status === "paused") {
+      // Shift sessionStartedAt forward by the pause duration so wall-clock math
+      // (used by the tick and session logging) excludes paused time.
+      setSessionStartedAt(resumeSessionStartedAt(totalSeconds, secondsRemaining, Date.now()));
     }
     setStatus("running");
     useStore.getState().setMascotMood("running");
@@ -133,19 +150,26 @@ export function useTimer() {
     setTimeout(() => useStore.getState().setMascotMood("idle"), 2500);
     if (sessionStartedAt !== null) {
       const now = Date.now();
-      const actualSec = Math.round((now - sessionStartedAt) / 1000);
+      // When paused, sessionStartedAt was set at resume time and the timer hasn't
+      // ticked since pause — derive elapsed from secondsRemaining to skip the
+      // in-progress pause window.
+      const effectiveEnd =
+        status === "paused"
+          ? sessionStartedAt + (totalSeconds - secondsRemaining) * 1000
+          : now;
+      const actualSec = computeActualDurationSec(sessionStartedAt, effectiveEnd, totalSeconds);
       if (actualSec > 0) {
         logSession({
           taskId: sessionType === "focus" ? activeTaskId : null,
           startedAt: sessionStartedAt,
           endedAt: now,
           plannedDurationSec: totalSeconds,
-          actualDurationSec: Math.min(actualSec, totalSeconds),
+          actualDurationSec: actualSec,
           type: sessionType,
         });
       }
     }
-    clearTick();
+    stopGlobalTick();
     setStatus("idle");
     setSessionStartedAt(null);
     const dur = getDurationForType(sessionType);
@@ -156,17 +180,20 @@ export function useTimer() {
   function skip() {
     if (sessionStartedAt !== null) {
       const now = Date.now();
-      const actualSec = Math.round((now - sessionStartedAt) / 1000);
+      const effectiveEnd =
+        status === "paused"
+          ? sessionStartedAt + (totalSeconds - secondsRemaining) * 1000
+          : now;
       logSession({
         taskId: sessionType === "focus" ? activeTaskId : null,
         startedAt: sessionStartedAt,
         endedAt: now,
         plannedDurationSec: totalSeconds,
-        actualDurationSec: Math.min(actualSec, totalSeconds),
+        actualDurationSec: computeActualDurationSec(sessionStartedAt, effectiveEnd, totalSeconds),
         type: sessionType,
       });
     }
-    clearTick();
+    stopGlobalTick();
     setStatus("idle");
     setSessionStartedAt(null);
 
@@ -182,7 +209,7 @@ export function useTimer() {
   }
 
   function switchType(type: SessionType, autoStart: boolean) {
-    clearTick();
+    stopGlobalTick();
     setCustomDurationSec(null);
     setSessionType(type);
     const dur = getDurationForType(type);
@@ -203,9 +230,12 @@ export function useTimer() {
 
   function setCustomDuration(minutes: number) {
     const sec = minutes * 60;
+    stopGlobalTick();
     setCustomDurationSec(sec);
     setSecondsRemaining(sec);
     setTotalSeconds(sec);
+    setStatus("idle");
+    setSessionStartedAt(null);
   }
 
   return {
